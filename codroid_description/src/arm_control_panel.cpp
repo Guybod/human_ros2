@@ -29,6 +29,7 @@ ArmControlPanel::ArmControlPanel(QWidget * parent)
   addToggleButton(tr("UDP 连接"), "/codroid_arm_bridge/connect", false, lifecycle_layout);
   addToggleButton(tr("机器人使能"), "/codroid_arm_bridge/enable", true, lifecycle_layout);
   addToggleButton(tr("获取控制权"), "/codroid_arm_bridge/lock", true, lifecycle_layout);
+  addToggleButton(tr("允许遥操作"), "/codroid_arm_bridge/teleoperation", true, lifecycle_layout);
   addToggleButton(tr("左臂实时控制"), "/codroid_arm_bridge/left_control", true, lifecycle_layout);
   addToggleButton(tr("右臂实时控制"), "/codroid_arm_bridge/right_control", true, lifecycle_layout);
   root->addWidget(lifecycle);
