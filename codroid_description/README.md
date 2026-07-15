@@ -163,6 +163,31 @@ ros2 topic pub --once /codroid/right_arm/pose_target geometry_msgs/msg/PoseStamp
 ros2 service call /codroid_arm_trajectory/cancel std_srvs/srv/Trigger "{}"
 ```
 
+#### 离散 Pose 路点规划与下发
+
+左右臂分别接受 `geometry_msgs/msg/PoseArray`：
+
+- `/codroid/left_arm/pose_waypoints`
+- `/codroid/right_arm/pose_waypoints`
+
+该接口使用最新实际关节角作为第一个 IK 初值，后续点连续使用上一点的关节解，随后
+自动分段计时并进行关节空间三次 Hermite 拟合。整条轨迹通过关节限位和速度检查后，
+才会以 100 Hz 下发；任意路点逆解失败都会拒绝整条路径。
+
+```bash
+ros2 topic pub --once /codroid/right_arm/pose_waypoints \
+  geometry_msgs/msg/PoseArray \
+  "{header: {frame_id: base_link}, poses: [
+    {position: {x: 0.30, y: -0.30, z: 0.20}, orientation: {w: 1.0}},
+    {position: {x: 0.32, y: -0.25, z: 0.23}, orientation: {w: 1.0}},
+    {position: {x: 0.30, y: -0.20, z: 0.20}, orientation: {w: 1.0}}
+  ]}"
+```
+
+所有 Pose 必须位于 `base_link` 坐标系。该接口使用本地数值 IK，不受单点 Pose 的
+`ik_solver` 选择影响；它保证关节轨迹连续通过路点，但不保证路点之间的末端轨迹为直线。
+完整上机顺序、状态说明和故障排查见[双臂控制接口文档](docs/双臂控制接口.md)。
+
 ### 启动参数
 
 | 参数 | 默认值 | 说明 |
