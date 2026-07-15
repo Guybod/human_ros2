@@ -11,7 +11,7 @@ from typing import Dict, List, Tuple
 
 import rclpy
 import websocket
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -31,17 +31,13 @@ RIGHT_JOINTS = [f'J_arm_r_{index:02d}' for index in range(1, 8)]
 class Waypoint:
     time_from_start: float
     positions: Tuple[float, ...]
-
-
-def cubic_blend(value: float) -> float:
-    """Cubic smoothstep with zero velocity at both endpoints."""
-    value = min(1.0, max(0.0, value))
-    return value * value * (3.0 - 2.0 * value)
+    velocities: Tuple[float, ...]
 
 
 class CoDroidArmTrajectory(Node):
-    def __init__(self) -> None:
-        super().__init__('codroid_arm_trajectory')
+    def __init__(self, parameter_overrides=None) -> None:
+        super().__init__(
+            'codroid_arm_trajectory', parameter_overrides=parameter_overrides)
         self.declare_parameter('frequency_hz', 100.0)
         self.declare_parameter('default_max_velocity', 0.25)
         self.declare_parameter('minimum_duration', 1.0)
@@ -52,6 +48,7 @@ class CoDroidArmTrajectory(Node):
         self.declare_parameter('ws_port', 9000)
         self.declare_parameter('ik_timeout', 3.0)
         self.declare_parameter('ik_solver', 'controller')
+        self.declare_parameter('path_minimum_segment_duration', 0.5)
 
         frequency = float(self.get_parameter('frequency_hz').value)
         if frequency <= 0.0:
@@ -60,9 +57,12 @@ class CoDroidArmTrajectory(Node):
         self._max_velocity = float(self.get_parameter('default_max_velocity').value)
         self._minimum_duration = float(self.get_parameter('minimum_duration').value)
         self._state_timeout = float(self.get_parameter('state_timeout').value)
+        self._path_minimum_segment = float(
+            self.get_parameter('path_minimum_segment_duration').value)
         self._hold_final = bool(self.get_parameter('hold_final_position').value)
-        if self._max_velocity <= 0.0 or self._minimum_duration <= 0.0:
-            raise ValueError('default_max_velocity and minimum_duration must be positive')
+        if (self._max_velocity <= 0.0 or self._minimum_duration <= 0.0
+                or self._path_minimum_segment <= 0.0):
+            raise ValueError('trajectory timing parameters must be positive')
 
         robot_description = str(self.get_parameter('robot_description').value)
         self._limits = self._parse_joint_limits(robot_description)
@@ -98,6 +98,14 @@ class CoDroidArmTrajectory(Node):
             PoseStamped, '/codroid/right_arm/pose_target',
             lambda message: self._pose_callback('RightArm', message), 1,
             callback_group=self._pose_callback_group)
+        self.create_subscription(
+            PoseArray, '/codroid/left_arm/pose_waypoints',
+            lambda message: self._pose_path_callback('LeftArm', message), 1,
+            callback_group=self._pose_callback_group)
+        self.create_subscription(
+            PoseArray, '/codroid/right_arm/pose_waypoints',
+            lambda message: self._pose_path_callback('RightArm', message), 1,
+            callback_group=self._pose_callback_group)
         self.create_service(Trigger, '~/cancel', self._cancel_callback)
         self.create_timer(
             self._period, self._timer_callback,
@@ -114,9 +122,76 @@ class CoDroidArmTrajectory(Node):
             trajectory.points.append(point)
             point.positions = joints
             # Zero time requests automatic duration from current joint feedback.
-            self._trajectory_callback(trajectory)
+            if not self._trajectory_callback(trajectory):
+                raise ValueError('fitted joint trajectory failed safety validation')
         except (ValueError, RuntimeError, OSError, websocket.WebSocketException) as error:
             self.get_logger().error(f'{arm_name} pose target rejected: {error}')
+            self._publish_status(f'rejected: {error}')
+
+    def _pose_path_callback(self, arm_name: str, message: PoseArray) -> None:
+        try:
+            if message.header.frame_id not in ('', 'base_link'):
+                raise ValueError('pose waypoint frame must be base_link')
+            if not message.poses:
+                raise ValueError('pose waypoint array is empty')
+            names = LEFT_JOINTS if arm_name == 'LeftArm' else RIGHT_JOINTS
+            with self._lock:
+                if time.monotonic() - self._latest_state_time > self._state_timeout:
+                    raise ValueError('pose path requires fresh /joint_states feedback')
+                if not all(name in self._latest_state for name in names):
+                    raise ValueError('pose path feedback is incomplete')
+                seed = [self._latest_state[name] for name in names]
+
+            joint_points = [list(seed)]
+            for index, pose in enumerate(message.poses):
+                try:
+                    seed = self._solve_local_pose(arm_name, pose, seed)
+                except ValueError as error:
+                    raise ValueError(f'waypoint {index} IK failed: {error}') from error
+                joint_points.append(list(seed))
+
+            times = [0.0]
+            for start, end in zip(joint_points, joint_points[1:]):
+                max_delta = max(abs(finish - begin) for begin, finish in zip(start, end))
+                duration = max(
+                    self._path_minimum_segment,
+                    2.0 * max_delta / self._max_velocity,
+                )
+                times.append(times[-1] + duration)
+
+            velocities = [[0.0] * 7 for _ in joint_points]
+            for index in range(1, len(joint_points) - 1):
+                span = times[index + 1] - times[index - 1]
+                velocities[index] = [
+                    max(-self._max_velocity, min(
+                        self._max_velocity,
+                        (joint_points[index + 1][joint] - joint_points[index - 1][joint]) / span))
+                    for joint in range(7)
+                ]
+
+            trajectory = JointTrajectory()
+            trajectory.joint_names = names
+            # Current feedback is injected by _prepare_trajectory, so publish only target points.
+            for index in range(1, len(joint_points)):
+                point = JointTrajectoryPoint()
+                point.positions = joint_points[index]
+                point.velocities = velocities[index]
+                seconds = times[index]
+                whole_seconds = int(seconds)
+                nanoseconds = int(round((seconds - whole_seconds) * 1e9))
+                if nanoseconds >= 1_000_000_000:
+                    whole_seconds += 1
+                    nanoseconds -= 1_000_000_000
+                point.time_from_start.sec = whole_seconds
+                point.time_from_start.nanosec = nanoseconds
+                trajectory.points.append(point)
+            if not self._trajectory_callback(trajectory):
+                raise ValueError('fitted joint trajectory failed safety validation')
+            self.get_logger().info(
+                f'Local IK fitted path accepted for {arm_name}: '
+                f'{len(message.poses)} poses, {times[-1]:.3f}s')
+        except ValueError as error:
+            self.get_logger().error(f'{arm_name} pose path rejected: {error}')
             self._publish_status(f'rejected: {error}')
 
     def _solve_pose_ik(self, arm_name: str, message: PoseStamped) -> List[float]:
@@ -143,8 +218,13 @@ class CoDroidArmTrajectory(Node):
             if not all(name in self._latest_state for name in names):
                 raise ValueError('local IK feedback is incomplete')
             seed = [self._latest_state[name] for name in names]
-        position = message.pose.position
-        orientation = message.pose.orientation
+        return self._solve_local_pose(arm_name, message.pose, seed)
+
+    def _solve_local_pose(
+        self, arm_name: str, pose: Pose, seed: List[float]
+    ) -> List[float]:
+        position = pose.position
+        orientation = pose.orientation
         rotation = quaternion_matrix(
             orientation.x, orientation.y, orientation.z, orientation.w)
         return self._kinematics[arm_name].inverse(
@@ -231,13 +311,13 @@ class CoDroidArmTrajectory(Node):
             self._latest_state.update(values)
             self._latest_state_time = time.monotonic()
 
-    def _trajectory_callback(self, message: JointTrajectory) -> None:
+    def _trajectory_callback(self, message: JointTrajectory) -> bool:
         try:
             joint_names, waypoints = self._prepare_trajectory(message)
         except ValueError as error:
             self.get_logger().error(f'Trajectory rejected: {error}')
             self._publish_status(f'rejected: {error}')
-            return
+            return False
         with self._lock:
             self._joint_names = joint_names
             self._waypoints = waypoints
@@ -247,6 +327,7 @@ class CoDroidArmTrajectory(Node):
         self.get_logger().info(
             f'Accepted {len(waypoints) - 1}-segment trajectory for '
             f'{len(joint_names)} joints, duration={waypoints[-1].time_from_start:.3f}s')
+        return True
 
     def _prepare_trajectory(
         self, message: JointTrajectory
@@ -268,7 +349,7 @@ class CoDroidArmTrajectory(Node):
                 raise ValueError('feedback does not contain every commanded joint')
             start_positions = tuple(self._latest_state[name] for name in names)
 
-        result = [Waypoint(0.0, start_positions)]
+        result = [Waypoint(0.0, start_positions, tuple([0.0] * len(names)))]
         previous_positions = start_positions
         previous_time = 0.0
         single_auto_duration = len(message.points) == 1
@@ -289,10 +370,56 @@ class CoDroidArmTrajectory(Node):
                 )
             if requested_time <= previous_time:
                 raise ValueError('time_from_start values must be strictly increasing and positive')
-            result.append(Waypoint(requested_time, positions))
+            if point.velocities:
+                if len(point.velocities) != len(names):
+                    raise ValueError(f'point {index} velocity count does not match joint_names')
+                velocities = tuple(float(value) for value in point.velocities)
+                if not all(math.isfinite(value) for value in velocities):
+                    raise ValueError(f'point {index} contains a non-finite velocity')
+            else:
+                velocities = tuple([0.0] * len(names))
+            result.append(Waypoint(requested_time, positions, velocities))
             previous_positions = positions
             previous_time = requested_time
+        self._validate_fitted_trajectory(names, result)
         return names, result
+
+    def _validate_fitted_trajectory(
+        self, names: List[str], waypoints: List[Waypoint]
+    ) -> None:
+        for start, end in zip(waypoints, waypoints[1:]):
+            duration = end.time_from_start - start.time_from_start
+            for sample in range(21):
+                progress = sample / 20.0
+                positions = self._hermite_positions(start, end, progress)
+                self._check_limits(names, positions)
+                u2 = progress * progress
+                dh00 = 6.0 * u2 - 6.0 * progress
+                dh10 = 3.0 * u2 - 4.0 * progress + 1.0
+                dh01 = -dh00
+                dh11 = 3.0 * u2 - 2.0 * progress
+                velocities = [
+                    (dh00 * begin + dh01 * finish) / duration
+                    + dh10 * begin_velocity + dh11 * finish_velocity
+                    for begin, finish, begin_velocity, finish_velocity in zip(
+                        start.positions, end.positions, start.velocities, end.velocities)
+                ]
+                if max(abs(value) for value in velocities) > self._max_velocity * 1.05:
+                    raise ValueError('fitted trajectory exceeds default_max_velocity')
+
+    @staticmethod
+    def _hermite_positions(
+        start: Waypoint, end: Waypoint, progress: float
+    ) -> Tuple[float, ...]:
+        duration = end.time_from_start - start.time_from_start
+        return tuple(
+            (2.0 * progress ** 3 - 3.0 * progress ** 2 + 1.0) * begin
+            + (progress ** 3 - 2.0 * progress ** 2 + progress) * duration * begin_velocity
+            + (-2.0 * progress ** 3 + 3.0 * progress ** 2) * finish
+            + (progress ** 3 - progress ** 2) * duration * finish_velocity
+            for begin, finish, begin_velocity, finish_velocity in zip(
+                start.positions, end.positions, start.velocities, end.velocities)
+        )
 
     def _check_limits(self, names: List[str], positions: Tuple[float, ...]) -> None:
         for name, position in zip(names, positions):
@@ -322,11 +449,7 @@ class CoDroidArmTrajectory(Node):
             if elapsed <= end.time_from_start:
                 duration = end.time_from_start - start.time_from_start
                 progress = (elapsed - start.time_from_start) / duration
-                blend = cubic_blend(progress)
-                positions = tuple(
-                    begin + (finish - begin) * blend
-                    for begin, finish in zip(start.positions, end.positions)
-                )
+                positions = self._hermite_positions(start, end, progress)
                 self._publish_command(names, positions)
                 return
 

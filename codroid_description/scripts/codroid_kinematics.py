@@ -108,7 +108,7 @@ class ArmKinematics:
     def inverse(
         self, position: List[float], rotation: np.ndarray, seed: List[float],
         *, max_iterations: int = 250, damping: float = 0.03,
-        position_tolerance: float = 2e-4, orientation_tolerance: float = 2e-3,
+        position_tolerance: float = 5e-4, orientation_tolerance: float = 2e-3,
     ) -> List[float]:
         target_position = np.asarray(position, dtype=float)
         q = np.clip(np.asarray(seed, dtype=float), self.lower, self.upper)
