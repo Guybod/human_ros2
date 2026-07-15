@@ -38,6 +38,9 @@ def generate_launch_description():
         default_value='true',
         description='Launch RViz2'
     )
+    base_height_arg = DeclareLaunchArgument(
+        'base_height', default_value='1.5',
+        description='Height of base_link above world in meters')
 
     mesh_dir = os.path.join(pkg_share, 'meshes')
 
@@ -61,6 +64,11 @@ def generate_launch_description():
             'publish_frequency': 50.0,
         }]
     )
+    world_to_base = Node(
+        package='tf2_ros', executable='static_transform_publisher',
+        arguments=['--x', '0', '--y', '0', '--z', LaunchConfiguration('base_height'),
+                   '--yaw', '0', '--pitch', '0', '--roll', '0',
+                   '--frame-id', 'world', '--child-frame-id', 'base_link'])
 
     # Joint state publisher (with GUI for manual joint control)
     joint_state_pub_gui = Node(
@@ -91,7 +99,9 @@ def generate_launch_description():
     return LaunchDescription([
         gui_arg,
         rviz_arg,
+        base_height_arg,
         robot_state_pub,
+        world_to_base,
         joint_state_pub_gui,
         joint_state_pub,
         rviz_node,

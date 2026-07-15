@@ -31,12 +31,20 @@ def generate_launch_description():
         DeclareLaunchArgument('default_max_velocity', default_value='0.25'),
         DeclareLaunchArgument('ik_solver', default_value='controller'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('base_height', default_value='1.5'),
     ]
 
     state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
         parameters=[{'robot_description': robot_description, 'publish_frequency': 100.0}],
+        output='screen',
+    )
+    world_to_base = Node(
+        package='tf2_ros', executable='static_transform_publisher',
+        arguments=['--x', '0', '--y', '0', '--z', LaunchConfiguration('base_height'),
+                   '--yaw', '0', '--pitch', '0', '--roll', '0',
+                   '--frame-id', 'world', '--child-frame-id', 'base_link'],
         output='screen',
     )
     bridge = Node(
@@ -71,4 +79,4 @@ def generate_launch_description():
         output='screen',
     )
 
-    return LaunchDescription(arguments + [state_publisher, bridge, trajectory, rviz])
+    return LaunchDescription(arguments + [state_publisher, world_to_base, bridge, trajectory, rviz])

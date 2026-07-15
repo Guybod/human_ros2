@@ -62,6 +62,8 @@ ros2 launch codroid_description realtime_arms.launch.py \
 
 RViz 会自动加载 `CoDroid Arm Control` 面板，可直接操作 UDP 连接、机器人使能、
 控制权、左右臂实时控制、错误复位、轨迹取消和末端 Pose 目标。危险操作带二次确认。
+模型默认通过 `world → base_link` 固定变换抬高 `1.5 m`，可用
+`base_height:=<高度>` 覆盖；该变换只影响场景放置，不改变 `base_link` 下的 IK 输入。
 
 启动不会自动上使能、获取控制权或开启运动控制。首次上机前请阅读接口文档和安全说明。
 
