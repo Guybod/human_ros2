@@ -1,4 +1,6 @@
 Panels:
+  - Class: codroid_description/ArmControlPanel
+    Name: CoDroid Arm Control
   - Class: rviz_common/Displays
     Help Height: 78
     Name: Displays

@@ -1,0 +1,8 @@
+<library path="codroid_arm_control_panel">
+  <class
+    name="codroid_description/ArmControlPanel"
+    type="codroid_description::ArmControlPanel"
+    base_class_type="rviz_common::Panel">
+    <description>CoDroid dual-arm enable, control, and Pose command panel.</description>
+  </class>
+</library>

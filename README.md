@@ -11,6 +11,7 @@ CoDroid 人形机器人 ROS 2 Humble 描述与双臂控制包。
 - 从实际关节位置开始的三次平滑插值
 - 100 Hz 双臂关节位置下发
 - 不连接真机的 RViz 右臂挥动演示
+- RViz 内嵌双臂控制面板（使能、控制权、实时控制和 Pose 目标）
 
 ## 环境
 
@@ -58,6 +59,9 @@ ros2 launch codroid_description realtime_arms.launch.py \
   robot_ip:=192.168.2.16 \
   ik_solver:=controller_then_local
 ```
+
+RViz 会自动加载 `CoDroid Arm Control` 面板，可直接操作 UDP 连接、机器人使能、
+控制权、左右臂实时控制、错误复位、轨迹取消和末端 Pose 目标。危险操作带二次确认。
 
 启动不会自动上使能、获取控制权或开启运动控制。首次上机前请阅读接口文档和安全说明。
 
